@@ -2,6 +2,12 @@ import requests
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from datetime import datetime
+import time
+import logging
+
+# Setup logging
+logging.basicConfig(level=logging.INFO)
 
 """
 Summary:
@@ -12,8 +18,9 @@ on the trails. The script then consolidates the forecast information and sends i
 specified recipients.
 """
 
-# Send an email using the specified SMTP settings
 def send_email(subject, body, to_email, smtp_server, smtp_port, smtp_username, smtp_password):
+    logging.info("Sending email...")
+    
     # Set up email headers and body
     msg = MIMEMultipart()
     msg['From'] = smtp_username
@@ -28,62 +35,79 @@ def send_email(subject, body, to_email, smtp_server, smtp_port, smtp_username, s
         server.login(smtp_username, smtp_password)
         server.sendmail(smtp_username, to_email, msg.as_string())
         server.quit()
-        print("Email sent successfully")
+        logging.info("Email sent successfully")
     except Exception as e:
-        print(f"Error sending email: {str(e)}")
+        logging.error(f"Error sending email: {str(e)}")
 
-# Fetch the forecast data for the specified latitude and longitude from the National Weather Service
 def fetch_forecast_data(lat, lon):
-    # Construct the metadata URL
-    metadata_url = f"https://api.weather.gov/points/{lat},{lon}"
-    response = requests.get(metadata_url)
-    if response.status_code != 200:
-        raise ValueError("Error fetching metadata")
-    data = response.json()
-    # Extract the forecast URL from the metadata
-    forecast_url = data["properties"]["forecast"]
-    response = requests.get(forecast_url)
-    if response.status_code != 200:
-        raise ValueError("Error fetching forecast data")
-    # Return the forecast periods
-    return response.json()["properties"]["periods"]
+    logging.info(f"Fetching forecast data for coordinates {lat}, {lon}...")
+    
+    # Keep trying to fetch data until successful
+    while True:
+        try:
+            # Construct the metadata URL
+            metadata_url = f"https://api.weather.gov/points/{lat},{lon}"
+            response = requests.get(metadata_url)
+            response.raise_for_status()
+            data = response.json()
+            # Extract the forecast URL from the metadata
+            forecast_url = data["properties"]["forecast"]
+            response = requests.get(forecast_url)
+            response.raise_for_status()
+            # Return the forecast periods
+            return response.json()["properties"]["periods"]
+        except requests.HTTPError:
+            logging.warning("HTTP error while fetching data. Retrying in 10 seconds...")
+            time.sleep(10)
 
-# Determine if it's favorable to ride based on the forecast
-def determine_ride(forecast):
-    forecast = forecast.lower()
+def determine_ride(detailed_forecast):
+    detailed_forecast = detailed_forecast.lower()
 
-    if "rain" in forecast:
+    # Check for 100% precipitation first
+    if "chance of precipitation is 100%" in detailed_forecast:
+        return "NO RIDE (UNFAVORABLE WEATHER)"
+    elif "rain" in detailed_forecast:
         return "POSSIBLE RAIN"
-    elif any(cond in forecast for cond in
+    elif any(cond in detailed_forecast for cond in
              ["snow", "ice", "hail", "sleet", "storm", "thunderstorm", "tornado", "hurricane"]):
         return "NO RIDE (UNFAVORABLE WEATHER)"
     else:
         return "RIDE"
 
-# Generate a detailed forecast report for the specified location
+
 def generate_forecast_report(location_name, periods):
+    logging.info(f"Generating forecast report for {location_name}...")
+    
     weather_report = f"Weather Forecast for {location_name}:\n\n"
     day_summaries = []
 
     for period in periods[:7]:
+        # Parse and format the start and end times
+        start_time = datetime.fromisoformat(period['startTime'].replace('Z', '+00:00'))
+        end_time = datetime.fromisoformat(period['endTime'].replace('Z', '+00:00'))
+
+        formatted_start_time = start_time.strftime('%b %d, %Y, %I:%M %p')
+        formatted_end_time = end_time.strftime('%I:%M %p')
+
         # Compile forecast details for each period
         weather_report += f"""
-        Time: {period['startTime']} to {period['endTime']}
-        Temperature: {period['temperature']}Â°F
+        Time: {formatted_start_time} to {formatted_end_time}
+        Temperature: {period['temperature']}°F
         Forecast: {period['shortForecast']}
         Wind Speed: {period['windSpeed']}
         Wind Direction: {period['windDirection']}
         Detailed Weather: {period['detailedForecast']}
         """
 
-        ride_status = determine_ride(period['shortForecast'])
+        ride_status = determine_ride(period['detailedForecast'])
         weather_report += f"{ride_status}\n\n"
         day_summaries.append({"day": period['name'], "status": ride_status})
 
     return weather_report, day_summaries
 
-# Main execution
 if __name__ == "__main__":
+    logging.info("Starting the script...")
+
     # Define MTB trail locations with their respective latitude and longitude
     locations = [
         {"name": "Tiger Mountain, WA", "latitude": 47.488222, "longitude": -121.947280},
@@ -104,7 +128,7 @@ if __name__ == "__main__":
             combined_weather_report += report
             all_summaries.append({"location": location['name'], "days": day_summaries})
         except Exception as e:
-            print(f"Error fetching data for {location['name']}: {str(e)}")
+            logging.error(f"Error fetching data for {location['name']}: {str(e)}")
 
     summary_section = "Summary Report:\n\n"
     for summary in all_summaries:
@@ -112,6 +136,9 @@ if __name__ == "__main__":
         if favorable_days:
             days_string = ', '.join(favorable_days)
             summary_section += f"Favorable to ride at {summary['location']} on: {days_string}\n"
+        else:
+            summary_section += f"No favorable days to ride at {summary['location']}.\n"
+
     summary_section += "\n---------------------------------------------\n\n"
 
     # Email setup
@@ -120,12 +147,15 @@ if __name__ == "__main__":
     outro_body = ("If you have any suggestions for this report, or would like to be removed from the distribution list "
                   "please reply to this email\n\n Thanks,\n\n Trabun Automation")
 
-    to_email = ["", ""]  # Replace with the recipient's email addresses
+    to_email = [""]  # Replace with the recipient's email
     smtp_server = "smtp.gmail.com"
     smtp_port = 587
     smtp_username = ""  # Replace with your Gmail email address
     smtp_password = ""  # Replace with your Gmail password or an app-specific password
 
+
     # Send the consolidated report as an email
     send_email(subject, intro_body + summary_section + combined_weather_report + outro_body, to_email,
                smtp_server, smtp_port, smtp_username, smtp_password)
+    
+    logging.info("Script completed.")
